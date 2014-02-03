@@ -22,56 +22,56 @@ def load_current_resource
 end
 
 action :build do
-  unless installed?
+  unless installed? && tag_match
     build
     new_resource.updated_by_last_action(true)
   end
 end
 
 action :import do
-  unless installed?
+  unless installed? && tag_match
     import
     new_resource.updated_by_last_action(true)
   end
 end
 
 action :insert do
-  if installed?
+  if installed? && tag_match
     insert
     new_resource.updated_by_last_action(true)
   end
 end
 
 action :load do
-  unless installed?
+  unless installed? && tag_match
     load
     new_resource.updated_by_last_action(true)
   end
 end
 
 action :pull do
-  unless installed?
+  unless installed? && tag_match
     pull
     new_resource.updated_by_last_action(true)
   end
 end
 
 action :push do
-  if installed?
+  if installed? && tag_match
     push
     new_resource.updated_by_last_action(true)
   end
 end
 
 action :remove do
-  if installed?
+  if installed? && tag_match
     remove
     new_resource.updated_by_last_action(true)
   end
 end
 
 action :save do
-  if installed?
+  if installed? && tag_match
     save
     new_resource.updated_by_last_action(true)
   end
@@ -156,7 +156,7 @@ def insert
 end
 
 def installed?
-  @current_resource.installed && tag_match
+  @current_resource.installed
 end
 
 def load
@@ -184,6 +184,8 @@ def repository_and_tag_args
   if new_resource.repository
     docker_cmd_args = new_resource.repository
     docker_cmd_args += ":#{new_resource.tag}" if new_resource.tag
+  elsif new_resource.tag
+    docker_cmd_args = new_resource.tag
   end
   docker_cmd_args
 end
