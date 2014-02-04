@@ -1,17 +1,22 @@
 require 'chef/mixin/shell_out'
+require 'json'
 include Chef::Mixin::ShellOut
 include Helpers::Docker
 
 class CommandTimeout < RuntimeError; end
 
 def load_current_resource
-  @current_resource = Chef::Resource::DockerRegistry.new(new_resource)
-  # TODO: load current resource?
-  @current_resource
+  @current_resource = Chef::Resource::DockerRegistry.new(@new_resource.name)
+  @current_resource.name(@new_resource.name)
+  @current_resource.email(@new_resource.email)
+  @current_resource.password(@new_resource.password)
+  if logged_in?(@current_resource.name, @current_resource.email)
+    @current_resource.exists = true
+  end
 end
 
 action :login do
-  unless logged_in?
+  unless @current_resource.exists
     login
     new_resource.updated_by_last_action(true)
   end
@@ -36,8 +41,18 @@ EOM
   end
 end
 
-def logged_in?
-  @current_resource || true
+def logged_in?(name, email)
+  # Read auth file from user home
+  dockercfg = ::File.join(ENV['HOME'], '.dockercfg')
+  if ::File.exists?(dockercfg)
+    auth = JSON.parse(::File.read(dockercfg))
+    registry = ::File.join(name, '/v1/')
+    if auth.has_key?(registry)
+      if auth[registry].has_value?(email) && auth[registry].has_key?('auth')
+        true
+      end
+    end
+  end
 end
 
 def login

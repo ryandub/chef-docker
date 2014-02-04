@@ -8,3 +8,5 @@ attribute :cmd_timeout, :kind_of => [Integer], :default => node['docker']['regis
 attribute :email, :kind_of => [String]
 attribute :password, :kind_of => [String]
 attribute :username, :kind_of => [String]
+
+attr_accessor :exists
