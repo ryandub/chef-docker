@@ -165,10 +165,9 @@ end
 
 def pull
   pull_args = cli_args(
-    'registry' => new_resource.registry,
     't' => new_resource.tag
   )
-  docker_cmd("pull #{new_resource.image_name} #{pull_args}")
+  docker_cmd("pull #{pull_args} #{new_resource.image_name}")
 end
 
 def push
