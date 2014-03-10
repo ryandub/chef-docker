@@ -21,6 +21,7 @@ def load_current_resource
       @current_resource.id(id)
       @current_resource.status(status)
     end
+  end
   @current_resource
 end
 
@@ -127,7 +128,7 @@ def commit
   }
 
   image = current_resource.commit(options = options)
-  Chef::Log.debug("Docker container #{current_resource.id} committed to image #{image.id}."
+  Chef::Log.debug("Docker container #{current_resource.id} committed to image #{image.id}.")
 end
 
 def container_command_matches_if_exists?(command)
@@ -205,32 +206,8 @@ def restart
 end
 
 def run
-  # run_args = cli_args(
-  #   'c' => new_resource.cpu_shares,
-  #   'cidfile' => cidfile,
-  #   'd' => new_resource.detach,
-  #   'dns' => [*new_resource.dns],
-  #   'e' => [*new_resource.env],
-  #   'entrypoint' => new_resource.entrypoint,
-  #   'expose' => [*new_resource.expose],
-  #   'h' => new_resource.hostname,
-  #   'i' => new_resource.stdin,
-  #   'link' => [*new_resource.link],
-  #   'lxc-conf' => [*new_resource.lxc_conf],
-  #   'm' => new_resource.memory,
-  #   'name' => container_name,
-  #   'p' => [*port],
-  #   'P' => new_resource.publish_exposed_ports,
-  #   'privileged' => new_resource.privileged,
-  #   'rm' => new_resource.remove_automatically,
-  #   't' => new_resource.tty,
-  #   'u' => new_resource.user,
-  #   'v' => [*new_resource.volume],
-  #   'volumes-from' => new_resource.volumes_from,
-  #   'w' => new_resource.working_directory
-  # )
 
-  detached? = new_resource.detach || false
+  detached = new_resource.detach || false
   exposed_ports = {}
   published_ports = {}
   [*new_resource.port].each do |port|
@@ -255,7 +232,9 @@ def run
                                                 "HostIp" => "#{hostIP}"}]
         else
           published_ports["#{port[1]}/tcp"] = [{"HostPort" => "#{port[0]}"}]
+        end
       end
+    end
   end
 
   volumes = {}
@@ -265,9 +244,9 @@ def run
   end
 
   create_options = {
-    'AttachStdin' => detached?,
-    'AttachStdout' => detached?,
-    'AttachStdErr' => detached?,
+    'AttachStdin' => detached,
+    'AttachStdout' => detached,
+    'AttachStdErr' => detached,
     'Cmd' => new_resource.command.split(" "),
     'Dns' => new_resource.dns,
     'Env' => [*new_resource.env],
@@ -288,7 +267,7 @@ def run
   container = Docker::Container.create(create_options)
 
   start_options = {
-    'Binds' => [*new_resource.volumes],
+    'Binds' => [*new_resource.volume],
     'LxcConf' => [*new_resource.lxc_conf],
     'PortBindings' => published_ports,
     'PublishAllPorts' => new_resource.publish_exposed_ports,
@@ -507,7 +486,7 @@ def start
     service_create
   else
     start_options = {
-      'Binds' => [*new_resource.volumes],
+      'Binds' => [*new_resource.volume],
       'LxcConf' => [*new_resource.lxc_conf],
       'PortBindings' => published_ports,
       'PublishAllPorts' => new_resource.publish_exposed_ports,
