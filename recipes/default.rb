@@ -1,3 +1,5 @@
+chef_gem "docker-api"
+
 case node['platform']
 when 'debian', 'ubuntu'
   include_recipe 'apt'
