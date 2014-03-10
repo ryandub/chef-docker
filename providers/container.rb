@@ -1,23 +1,26 @@
+require 'docker'
+
 include Helpers::Docker
 
 def load_current_resource
   @current_resource = Chef::Resource::DockerContainer.new(new_resource)
   wait_until_ready!
-  dps = docker_cmd!('ps -a -notrunc')
-  dps.stdout.each_line do |dps_line|
-    ps = dps(dps_line)
-    unless container_id_matches?(ps['id'])
-      next unless container_image_matches?(ps['image'])
-      next unless container_command_matches_if_exists?(ps['command'])
-      next unless container_name_matches_if_exists?(ps['names'])
+  ids = Docker::Container.all(:all => true).map { |container| container.id }
+  ids.each do |id|
+    container = Docker::Container.get(id)
+    command = container.json['Config']['Cmd'].join(" ")
+    image = container.json['Image']
+    name = container.json['Name'].gsub("/","")
+    created = container.json['Created']
+    status = container.json['State']
+    if container_image_matches?(image) && container_command_matches_if_exists?(command) && container_name_matches_if_exists?(name)
+      Chef::Log.debug('Matched docker container: ' + 'ID: ' + id + ' Image: ' + image + ' Command: ' + command + ' Name: ' + name)
+      @current_resource.container(container)
+      @current_resource.container_name(name)
+      @current_resource.created(created)
+      @current_resource.id(id)
+      @current_resource.status(status)
     end
-    Chef::Log.debug('Matched docker container: ' + dps_line.squeeze(' '))
-    @current_resource.container_name(ps['names'])
-    @current_resource.created(ps['created'])
-    @current_resource.id(ps['id'])
-    @current_resource.status(ps['status'])
-    break
-  end
   @current_resource
 end
 
@@ -115,21 +118,20 @@ def cidfile
 end
 
 def commit
-  commit_args = cli_args(
+  options = {
     'author' => new_resource.author,
+    'tag' => new_resource.tag,
+    'repo' => new_resource.repo,
     'm' => new_resource.message,
     'run' => new_resource.run
-  )
-  commit_end_args = ''
-  if new_resource.repository
-    commit_end_args = new_resource.repository
-    commit_end_args += ":#{new_resource.tag}" if new_resource.tag
-  end
-  docker_cmd!("commit #{commit_args} #{current_resource.id} #{commit_end_args}")
+  }
+
+  image = current_resource.commit(options = options)
+  Chef::Log.debug("Docker container #{current_resource.id} committed to image #{image.id}."
 end
 
 def container_command_matches_if_exists?(command)
-  return false if new_resource.command && !command.include?(new_resource.command)
+  return false if new_resource.command && command != new_resource.command
   true
 end
 
@@ -141,8 +143,8 @@ def container_image_matches?(image)
   image.include?(new_resource.image)
 end
 
-def container_name_matches_if_exists?(names)
-  return false if new_resource.container_name && new_resource.container_name != names
+def container_name_matches_if_exists?(name)
+  return false if new_resource.container_name && new_resource.container_name != name
   true
 end
 
@@ -155,34 +157,9 @@ def container_name
 end
 
 def cp
-  docker_cmd!("cp #{current_resource.id}:#{new_resource.source} #{new_resource.destination}")
-end
-
-def dps(dps_line)
-  split_line = dps_line.split(/\s\s+/)
-  ps = {}
-  ps['id'] = split_line[0]
-  ps['image'] = split_line[1]
-  ps['command'] = split_line[2]
-  ps['created'] = split_line[3]
-  ps['status'] = split_line[4]
-  if split_line[6]
-    ps['ports'] = split_line[5]
-    ps['names'] = split_line[6]
-  else
-    ps['names'] = split_line[5]
+  File.open(new_resource.destination, 'w') do |f|
+    @current_resource.container.copy(new_resource.source) { |chunk| file.write(chunk) }
   end
-  ps
-end
-
-def command_timeout_error_message
-  <<-EOM
-
-Command timed out:
-#{cmd}
-
-Please adjust node container_cmd_timeout attribute or this docker_container cmd_timeout attribute if necessary.
-EOM
 end
 
 def exists?
@@ -190,14 +167,16 @@ def exists?
 end
 
 def export
-  docker_cmd!("export #{current_resource.id} > #{new_resource.destination}")
+  File.open(new_resource.destination, 'w') do |f|
+    @current_resource.container.export { |chunk| file.write(chunk) }
+  end
 end
 
 def kill
   if service?
     service_stop
   else
-    docker_cmd!("kill #{current_resource.id}")
+    @current_resource.container.kill
   end
 end
 
@@ -213,10 +192,7 @@ def port
 end
 
 def remove
-  rm_args = cli_args(
-    'link' => new_resource.link
-  )
-  docker_cmd!("rm #{rm_args} #{current_resource.id}")
+  current_resource.container.delete
   service_remove if service?
 end
 
@@ -224,43 +200,109 @@ def restart
   if service?
     service_restart
   else
-    docker_cmd!("restart #{current_resource.id}")
+    current_resource.container.restart
   end
 end
 
 def run
-  run_args = cli_args(
-    'c' => new_resource.cpu_shares,
-    'cidfile' => cidfile,
-    'd' => new_resource.detach,
-    'dns' => [*new_resource.dns],
-    'e' => [*new_resource.env],
-    'entrypoint' => new_resource.entrypoint,
-    'expose' => [*new_resource.expose],
-    'h' => new_resource.hostname,
-    'i' => new_resource.stdin,
-    'link' => [*new_resource.link],
-    'lxc-conf' => [*new_resource.lxc_conf],
-    'm' => new_resource.memory,
-    'name' => container_name,
-    'p' => [*port],
-    'P' => new_resource.publish_exposed_ports,
-    'privileged' => new_resource.privileged,
-    'rm' => new_resource.remove_automatically,
-    't' => new_resource.tty,
-    'u' => new_resource.user,
-    'v' => [*new_resource.volume],
-    'volumes-from' => new_resource.volumes_from,
-    'w' => new_resource.working_directory
-  )
-  dr = docker_cmd!("run #{run_args} #{new_resource.image} #{new_resource.command}")
-  dr.error!
-  new_resource.id(dr.stdout.chomp)
+  # run_args = cli_args(
+  #   'c' => new_resource.cpu_shares,
+  #   'cidfile' => cidfile,
+  #   'd' => new_resource.detach,
+  #   'dns' => [*new_resource.dns],
+  #   'e' => [*new_resource.env],
+  #   'entrypoint' => new_resource.entrypoint,
+  #   'expose' => [*new_resource.expose],
+  #   'h' => new_resource.hostname,
+  #   'i' => new_resource.stdin,
+  #   'link' => [*new_resource.link],
+  #   'lxc-conf' => [*new_resource.lxc_conf],
+  #   'm' => new_resource.memory,
+  #   'name' => container_name,
+  #   'p' => [*port],
+  #   'P' => new_resource.publish_exposed_ports,
+  #   'privileged' => new_resource.privileged,
+  #   'rm' => new_resource.remove_automatically,
+  #   't' => new_resource.tty,
+  #   'u' => new_resource.user,
+  #   'v' => [*new_resource.volume],
+  #   'volumes-from' => new_resource.volumes_from,
+  #   'w' => new_resource.working_directory
+  # )
+
+  detached? = new_resource.detach || false
+  exposed_ports = {}
+  published_ports = {}
+  [*new_resource.port].each do |port|
+    # If port is a Fixnum, don't publish.
+    if port.is_a?(Fixnum)
+      exposed_ports["#{port}/tcp"] = {}
+    else
+      port = port.split(":")
+      # Allow binding by IP addresses.
+      if port[0].include?(".")
+        hostIP = port[0]
+        port[0] = port[1]
+        port[1] = port[2]
+      end
+      exposed_ports["#{port[1]}/tcp"] = {}
+      # If port was ':<port>' publish the same port on the host.
+      if port[0].empty?
+        published_ports["#{port[1]}/tcp"] = [{"HostPort" => "#{port[1]}"}]
+      else
+        if hostIP
+          published_ports["#{port[1]}/tcp"] = [{"HostPort" => "#{port[0]}",
+                                                "HostIp" => "#{hostIP}"}]
+        else
+          published_ports["#{port[1]}/tcp"] = [{"HostPort" => "#{port[0]}"}]
+      end
+  end
+
+  volumes = {}
+  cont_volumes = [*new_resource.volume].map { |v| v.split(":")[1] }
+  cont_volumes.each do |v|
+    volumes[v] = {}
+  end
+
+  create_options = {
+    'AttachStdin' => detached?,
+    'AttachStdout' => detached?,
+    'AttachStdErr' => detached?,
+    'Cmd' => new_resource.command.split(" "),
+    'Dns' => new_resource.dns,
+    'Env' => [*new_resource.env],
+    'ExposedPorts' => exposed_ports,
+    'Entrypoint' => new_resource.entrypoint,
+    'Hostname' => new_resource.hostname,
+    'Image' => new_resource.image,
+    'Memory' => new_resource.memory,
+    'Name' => new_resource.name,
+    'OpenStdin' => new_resource.stdin,
+    'Tty' => new_resource.tty,
+    'User' => new_resource.user,
+    'Volumes' => volumes,
+    'VolumesFrom' => new_resource.volumes_from,
+    'WorkingDir' => new_resource.working_directory
+  }
+
+  container = Docker::Container.create(create_options)
+
+  start_options = {
+    'Binds' => [*new_resource.volumes],
+    'LxcConf' => [*new_resource.lxc_conf],
+    'PortBindings' => published_ports,
+    'PublishAllPorts' => new_resource.publish_exposed_ports,
+    'Privileged' => new_resource.privileged
+  }
+
+  container.start(start_options)
+
+  new_resource.id(container.id)
   service_create if service?
 end
 
 def running?
-  @current_resource.status.include?('Up') if @current_resource.status
+  @current_resource.status['Running'] if @current_resource.status
 end
 
 def service?
@@ -460,14 +502,19 @@ def sockets
 end
 
 def start
-  start_args = cli_args(
-    'a' => new_resource.attach,
-    'i' => new_resource.stdin
-  )
+
   if service?
     service_create
   else
-    docker_cmd!("start #{start_args} #{current_resource.id}")
+    start_options = {
+      'Binds' => [*new_resource.volumes],
+      'LxcConf' => [*new_resource.lxc_conf],
+      'PortBindings' => published_ports,
+      'PublishAllPorts' => new_resource.publish_exposed_ports,
+      'Privileged' => new_resource.privileged
+    }
+
+    current_resource.container.start(start_options)
   end
 end
 
@@ -478,10 +525,10 @@ def stop
   if service?
     service_stop
   else
-    docker_cmd!("stop #{stop_args} #{current_resource.id}", (new_resource.cmd_timeout + 15))
+    current_resource.container.stop
   end
 end
 
 def wait
-  docker_cmd!("wait #{current_resource.id}")
+  current_resource.container.wait
 end
