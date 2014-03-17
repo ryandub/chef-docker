@@ -1,6 +1,5 @@
-require 'docker'
-
 include Helpers::Docker
+include Opscode::Docker
 
 def load_current_resource
   @current_resource = Chef::Resource::DockerContainer.new(new_resource)
@@ -9,13 +8,13 @@ def load_current_resource
   ids.each do |id|
     container = Docker::Container.get(id)
     command = container.json['Config']['Cmd'].join(" ")
-    image = container.json['Image']
+    image_id = container.json['Image']
+    image_name = container.json['Config']['Image']
     name = container.json['Name'].gsub("/","")
     created = container.json['Created']
-    status = container.json['State']
-    if container_image_matches?(image) && container_command_matches_if_exists?(command) && container_name_matches_if_exists?(name)
-      Chef::Log.debug('Matched docker container: ' + 'ID: ' + id + ' Image: ' + image + ' Command: ' + command + ' Name: ' + name)
-      @current_resource.container(container)
+    status = status?(container.json['State'])
+    if container_image_matches?(image_id, image_name) && container_command_matches_if_exists?(command) && container_name_matches_if_exists?(name)
+      Chef::Log.debug('Matched docker container: ' + 'ID: ' + id + ' ImageID: ' + image_id + ' Command: ' + command + ' Name: ' + name)
       @current_resource.container_name(name)
       @current_resource.created(created)
       @current_resource.id(id)
@@ -140,8 +139,8 @@ def container_id_matches?(id)
   id.start_with?(new_resource.id)
 end
 
-def container_image_matches?(image)
-  image.include?(new_resource.image)
+def container_image_matches?(image_id, image_name)
+  image_id.include?(new_resource.image) || image_name.include?(new_resource.image)
 end
 
 def container_name_matches_if_exists?(name)
@@ -157,9 +156,13 @@ def container_name
   end
 end
 
+# def container_ports_match(port)
+#   return false if
+
 def cp
   File.open(new_resource.destination, 'w') do |f|
-    @current_resource.container.copy(new_resource.source) { |chunk| file.write(chunk) }
+    container = Docker::Container.get(@current_resource.id)
+    container.copy(new_resource.source) { |chunk| file.write(chunk) }
   end
 end
 
@@ -169,52 +172,20 @@ end
 
 def export
   File.open(new_resource.destination, 'w') do |f|
-    @current_resource.container.export { |chunk| file.write(chunk) }
+    container = Docker::Container.get(@current_resource.id)
+    container.export { |chunk| file.write(chunk) }
   end
 end
 
-def kill
-  if service?
-    service_stop
-  else
-    @current_resource.container.kill
-  end
-end
-
-def port
-  # DEPRECATED support for public_port attribute and Fixnum port
-  if new_resource.public_port && new_resource.port.is_a?(Fixnum)
-    "#{new_resource.public_port}:#{new_resource.port}"
-  elsif new_resource.port && new_resource.port.is_a?(Fixnum)
-    ":#{new_resource.port}"
-  else
-    new_resource.port
-  end
-end
-
-def remove
-  current_resource.container.delete
-  service_remove if service?
-end
-
-def restart
-  if service?
-    service_restart
-  else
-    current_resource.container.restart
-  end
-end
-
-def run
-
-  detached = new_resource.detach || false
+def get_ports
+  ports = {}
   exposed_ports = {}
   published_ports = {}
   [*new_resource.port].each do |port|
     # If port is a Fixnum, don't publish.
     if port.is_a?(Fixnum)
       exposed_ports["#{port}/tcp"] = {}
-    else
+    elsif port.include?(":")
       port = port.split(":")
       # Allow binding by IP addresses.
       if port[0].include?(".")
@@ -234,34 +205,75 @@ def run
           published_ports["#{port[1]}/tcp"] = [{"HostPort" => "#{port[0]}"}]
         end
       end
+    else
+      exposed_ports["#{port}/tcp"] = {}
     end
   end
+  ports['exposed_ports'] = exposed_ports
+  ports['published_ports'] = published_ports
+  return ports
+end
 
+def get_volumes
   volumes = {}
   cont_volumes = [*new_resource.volume].map { |v| v.split(":")[1] }
   cont_volumes.each do |v|
     volumes[v] = {}
   end
+  return volumes
+end
+
+def kill
+  if service?
+    service_stop
+  else
+    container = Docker::Container.get(@current_resource.id)
+    container.kill
+  end
+end
+
+def remove
+  container = Docker::Container.get(@current_resource.id)
+  container.delete
+  service_remove if service?
+end
+
+def restart
+  if service?
+    service_restart
+  else
+    container = Docker::Container.get(@current_resource.id)
+    container.restart
+  end
+end
+
+def run
+
+  attach = new_resource.detach ? false : true
+
+  ports = get_ports
+  volumes = get_volumes
+  command = new_resource.command.split(" ") unless new_resource.command.nil?
 
   create_options = {
-    'AttachStdin' => detached,
-    'AttachStdout' => detached,
-    'AttachStdErr' => detached,
-    'Cmd' => new_resource.command.split(" "),
+    'AttachStdin' => attach,
+    'AttachStdout' => attach,
+    'AttachStdErr' => attach,
+    'Cmd' => command,
     'Dns' => new_resource.dns,
     'Env' => [*new_resource.env],
-    'ExposedPorts' => exposed_ports,
+    'ExposedPorts' => ports['exposed_ports'],
     'Entrypoint' => new_resource.entrypoint,
     'Hostname' => new_resource.hostname,
     'Image' => new_resource.image,
     'Memory' => new_resource.memory,
-    'Name' => new_resource.name,
+    'name' => new_resource.container_name,
     'OpenStdin' => new_resource.stdin,
     'Tty' => new_resource.tty,
-    'User' => new_resource.user,
+    'User' => new_resource.user || "",
     'Volumes' => volumes,
-    'VolumesFrom' => new_resource.volumes_from,
-    'WorkingDir' => new_resource.working_directory
+    'VolumesFrom' => new_resource.volumes_from || "",
+    'WorkingDir' => new_resource.working_directory || ""
   }
 
   container = Docker::Container.create(create_options)
@@ -269,7 +281,7 @@ def run
   start_options = {
     'Binds' => [*new_resource.volume],
     'LxcConf' => [*new_resource.lxc_conf],
-    'PortBindings' => published_ports,
+    'PortBindings' => ports['published_ports'],
     'PublishAllPorts' => new_resource.publish_exposed_ports,
     'Privileged' => new_resource.privileged
   }
@@ -281,7 +293,8 @@ def run
 end
 
 def running?
-  @current_resource.status['Running'] if @current_resource.status
+  return true if (@current_resource.status && @current_resource.status != "stopped")
+  return false
 end
 
 def service?
@@ -481,20 +494,29 @@ def sockets
 end
 
 def start
-
   if service?
     service_create
   else
+
+    ports = get_ports
+
     start_options = {
       'Binds' => [*new_resource.volume],
       'LxcConf' => [*new_resource.lxc_conf],
-      'PortBindings' => published_ports,
+      'PortBindings' => ports['published_ports'],
       'PublishAllPorts' => new_resource.publish_exposed_ports,
       'Privileged' => new_resource.privileged
     }
 
-    current_resource.container.start(start_options)
+    container = Docker::Container.get(@current_resource.id)
+    container.start(start_options)
   end
+end
+
+def status?(state)
+  return "ghost" if state['Ghost']
+  return "running" if state['Running']
+  return "stopped" if !state['Running']
 end
 
 def stop
@@ -504,10 +526,12 @@ def stop
   if service?
     service_stop
   else
-    current_resource.container.stop
+    container = Docker::Container.get(@current_resource.id)
+    container.stop
   end
 end
 
 def wait
-  current_resource.container.wait
+  container = Docker::Container.get(@current_resource.id)
+  container.wait
 end
