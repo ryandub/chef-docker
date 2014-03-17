@@ -56,4 +56,5 @@ suites:
   - recipe[docker_test::container_lwrp]
   attributes: 
     docker:
+      version: "0.9.0"
       container_cmd_timeout: 30
